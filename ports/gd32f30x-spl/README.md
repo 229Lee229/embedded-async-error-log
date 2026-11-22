@@ -105,3 +105,66 @@ void log_demo_poll(void)
 - [GD32F303xx 数据手册（引脚功能）](https://www.gd32mcu.com/data/documents/datasheet/GD32F303xx%20Datasheet_Rev3.3.pdf)
 - [GD32F30x 用户手册（DMA 请求映射与 USART DMA 发送）](https://www.gd32mcu.com/data/documents/userManual/GD32F30x_User_Manual_Rev2.9.pdf)
 - [GD32F30x 标准外设库使用指南](https://www.gd32mcu.com/data/documents/userManual/GD32F30x_Firmware_Library_User_Guide_Rev1.0.pdf)
+
+## Flash 保存和上电回放
+
+项目宏设 `ERROR_LOG_FLASH_ENABLED=1`，加入 `src/error_log_flash.c` 和本目录的 `error_log_gd32f30x_flash.c`。保留原 GPIO、系统时钟和 UART 初始化。在链接配置中预留一块由完整页组成的 Bank0 Flash 区，用 `APP_LOG_FLASH_BASE` 和 `APP_LOG_FLASH_SIZE` 提供该区域的实际地址和字节数。工程还需编译标准库的 `gd32f30x_fmc.c`。此适配面向 GD32F303CGT6 的 Bank0，使用与该器件匹配的 SDK 设备宏。
+
+在诊断串口初始化后调用下方的启动函数。示例调用 [公共启动代码 `diagnostic_log_start()`](../../docs/flash.md#3-接入启动流程与后台)，先扫描和输出历史记录，再在后台定期调用 `diagnostic_log_step()` 保存新记录。
+
+```c
+#include "error_log_gd32f30x_flash.h"
+#include "gd32f30x_usart.h"
+
+error_log_flash_result_t diagnostic_log_start(
+    const error_log_flash_driver_t *flash_driver, void *uart_context);
+
+error_log_flash_result_t gd32_log_start(void)
+{
+    static error_log_gd32f30x_flash_region_t region = {
+        .base = APP_LOG_FLASH_BASE,
+        .size = APP_LOG_FLASH_SIZE,
+    };
+    error_log_flash_driver_t driver;
+
+    if (!error_log_gd32f30x_flash_make_driver(&driver, &region)) {
+        return ERROR_LOG_FLASH_INVALID_ARGUMENT;
+    }
+    return diagnostic_log_start(&driver, NULL);
+}
+```
+
+`region` 需要在整个日志服务运行期间有效。Flash 控制器还给其他任务写配置或擦页时，在 `region` 提供与它们共用的 `.lock`、`.unlock`、`.lock_context`。日志适配器只在指定区域追加。此适配面向 GD32F303CGT6 的 Bank0，页大小为 2 KiB。需要使用正常执行的毫秒时基 `board_millis()` 来限制串口超时。
+
+回放时，串口写回调逐行发送，保留每行 100 ms 的预算。串口需已经就绪且当前没有 DMA TX 操作。
+
+```c
+/* Application's millisecond timebase, advancing during this blocking call. */
+uint32_t board_millis(void);
+
+static bool wait_usart_flag(usart_flag_enum flag, uint32_t start_ms)
+{
+    while (usart_flag_get(USART1, flag) == RESET) {
+        if ((uint32_t)(board_millis() - start_ms) >= 100U) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool board_log_write(void *context, const char *data, size_t length)
+{
+    (void)context;
+    const uint32_t start_ms = board_millis();
+
+    for (size_t i = 0; i < length; ++i) {
+        if (!wait_usart_flag(USART_FLAG_TBE, start_ms)) {
+            return false;
+        }
+        usart_data_transmit(USART1, (uint16_t)(uint8_t)data[i]);
+    }
+    return wait_usart_flag(USART_FLAG_TC, start_ms);
+}
+```
+
+完整步骤、上电输出样板和字段说明见 [Flash 保存与上电回放](../../docs/flash.md)。

@@ -99,3 +99,49 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 - [ST STM32F4 HAL UART 源码](https://github.com/STMicroelectronics/stm32f4xx-hal-driver/blob/master/Src/stm32f4xx_hal_uart.c)
 - [ST STM32 GPDMA 应用笔记 AN5593](https://www.st.com/content/st_com/en/technical-documents/an5593-how-to-use-the-gpdma-for-stm32-mcus-stmicroelectronics.html)
 - [ST STM32F7/H7 D-Cache 应用笔记 AN4839](https://www.st.com/resource/en/application_note/an4839-level-1-cache-on-stm32f7-series-and-stm32h7-series-stmicroelectronics.pdf)
+
+## Flash 保存和上电回放
+
+项目宏设 `ERROR_LOG_FLASH_ENABLED=1`，加入 `src/error_log_flash.c` 和本目录的 `error_log_stm32f4_flash.c`。保留原 GPIO、系统时钟和 UART 初始化。在链接配置中预留一块由完整扇区组成的 Flash 区，用 `APP_LOG_FLASH_BASE` 和 `APP_LOG_FLASH_SIZE` 提供该区域的实际地址和字节数。CubeF4 工程启用 `HAL_FLASH_MODULE_ENABLED` 并编译 `stm32f4xx_hal_flash.c`。F411xC/xE 的容量和扇区边界由板级适配校验。
+
+在诊断串口初始化后调用下方的启动函数。示例调用 [公共启动代码 `diagnostic_log_start()`](../../docs/flash.md#3-接入启动流程与后台)，先扫描和输出历史记录，再在后台定期调用 `diagnostic_log_step()` 保存新记录。
+
+```c
+#include "error_log_stm32f4_flash.h"
+#include "stm32f4xx_hal.h"
+
+error_log_flash_result_t diagnostic_log_start(
+    const error_log_flash_driver_t *flash_driver, void *uart_context);
+
+error_log_flash_result_t stm32_log_start(UART_HandleTypeDef *uart)
+{
+    static error_log_stm32f4_flash_region_t region = {
+        .base = APP_LOG_FLASH_BASE,
+        .size = APP_LOG_FLASH_SIZE,
+    };
+    error_log_flash_driver_t driver;
+
+    if (!error_log_stm32f4_flash_make_driver(&driver, &region)) {
+        return ERROR_LOG_FLASH_INVALID_ARGUMENT;
+    }
+    return diagnostic_log_start(&driver, uart);
+}
+```
+
+`region` 需要在整个日志服务运行期间有效。Flash 控制器还给其他任务写配置或擦页时，在 `region` 提供与它们共用的 `.lock`、`.unlock`、`.lock_context`。日志适配器只在指定区域追加。F411 适配使用 HAL 的字节编程，按数据手册在 1.7–3.6 V 编程电压范围内使用。片内 Flash 编程可能阻塞同 Bank 读取，应在目标板检查实时性。
+
+回放时，串口写回调逐行发送，保留每行 100 ms 的预算。串口需已经就绪且当前没有 DMA TX 操作。
+
+```c
+bool board_log_write(void *context, const char *data, size_t length)
+{
+    UART_HandleTypeDef *uart = context;
+    return uart != NULL && length <= UINT16_MAX &&
+        HAL_UART_Transmit(uart, (uint8_t *)data, (uint16_t)length, 100U) == HAL_OK;
+}
+```
+
+完整步骤、上电输出样板和字段说明见 [Flash 保存与上电回放](../../docs/flash.md)。
+
+- [ST STM32F411 参考手册 RM0383](https://www.st.com/resource/en/reference_manual/rm0383-stm32f411xce-advanced-armbased-32bit-mcus-stmicroelectronics.pdf)
+- [ST STM32F411xC/E 数据手册](https://www.st.com/resource/en/datasheet/stm32f411ce.pdf)
