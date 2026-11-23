@@ -9,6 +9,7 @@
 | 换成其他 MCU、RTOS 或串口驱动 | [通用移植指南](docs/porting.md) |
 | 启用 Flash 保存和上电回放 | [Flash 保存与上电回放](docs/flash.md) |
 | 理解固定队列、后台消费和缓冲区所有权 | [设计与实现](docs/design.md) |
+| 了解 UART DMA 非阻塞调试打印 | [UART DMA 调试打印笔记](docs/uart-dma-debug-print.md) |
 
 ## 最小例子
 
